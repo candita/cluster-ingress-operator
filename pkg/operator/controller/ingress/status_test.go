@@ -1,7 +1,6 @@
 package ingress
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -821,51 +820,72 @@ func TestComputeLoadBalancerStatus(t *testing.T) {
 
 func TestComputeIngressAvailableCondition(t *testing.T) {
 	testCases := []struct {
-		description          string
-		deploymentConditions []appsv1.DeploymentCondition
-		expect               operatorv1.OperatorCondition
+		description string
+		conditions  []operatorv1.OperatorCondition
+		expect      []operatorv1.OperatorCondition
 	}{
 		{
-			description: "deployment available",
-			deploymentConditions: []appsv1.DeploymentCondition{
-				{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue},
+			description: "deployment, dns, and lb available",
+			conditions: []operatorv1.OperatorCondition{
+				{Type: string(appsv1.DeploymentAvailable), Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.DNSReadyIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerManagedIngressConditionType,Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionTrue},
 			},
-			expect: operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionTrue},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionTrue}},
 		},
 		{
-			description: "deployment not available",
-			deploymentConditions: []appsv1.DeploymentCondition{
-				{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse},
+			description: "deployment not available, but dns and lb available",
+			conditions: []operatorv1.OperatorCondition{
+				{Type: string(appsv1.DeploymentAvailable), Status: operatorv1.ConditionFalse},
+				{Type: operatorv1.DNSReadyIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerManagedIngressConditionType,Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionTrue},
 			},
-			expect: operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse}},
 		},
 		{
-			description: "deployment availability unknown",
-			deploymentConditions: []appsv1.DeploymentCondition{
-				{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionUnknown},
+			description: "dns not available, but deployment and lb available",
+			conditions: []operatorv1.OperatorCondition{
+				{Type: string(appsv1.DeploymentAvailable), Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerManagedIngressConditionType,Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.DNSManagedIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.DNSReadyIngressConditionType, Status: operatorv1.ConditionFalse},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionTrue},
 			},
-			expect: operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse}},
 		},
 		{
-			description: "deployment availability not present",
-			deploymentConditions: []appsv1.DeploymentCondition{
-				{Type: appsv1.DeploymentProgressing, Status: corev1.ConditionUnknown},
+			description: "lb not available, but dns and deployment available",
+			conditions: []operatorv1.OperatorCondition{
+				{Type: string(appsv1.DeploymentAvailable), Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.DNSReadyIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerManagedIngressConditionType,Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionFalse},
 			},
-			expect: operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse}},
+		},
+		{
+			description: "all availability unknown",
+			conditions: []operatorv1.OperatorCondition{
+				{Type: string(appsv1.DeploymentAvailable), Status: operatorv1.ConditionUnknown},
+				{Type: operatorv1.DNSManagedIngressConditionType, Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.DNSReadyIngressConditionType, Status: operatorv1.ConditionUnknown},
+				{Type: operatorv1.LoadBalancerManagedIngressConditionType,Status: operatorv1.ConditionTrue},
+				{Type: operatorv1.LoadBalancerReadyIngressConditionType, Status: operatorv1.ConditionUnknown},
+			},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse}},
+		},
+		{
+			description: "all availability not present",
+			conditions: []operatorv1.OperatorCondition{},
+			expect: []operatorv1.OperatorCondition{operatorv1.OperatorCondition{Type: operatorv1.OperatorStatusTypeAvailable, Status: operatorv1.ConditionFalse}},
 		},
 	}
 
-	for i, tc := range testCases {
-		deploy := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: fmt.Sprintf("ingress-controller-%d", i+1),
-			},
-			Status: appsv1.DeploymentStatus{
-				Conditions: tc.deploymentConditions,
-			},
-		}
-
-		actual := computeIngressAvailableCondition(deploy)
+	for _, tc := range testCases {
+		actual := computeIngressAvailableCondition(tc.conditions)
 		conditionsCmpOpts := []cmp.Option{
 			cmpopts.IgnoreFields(operatorv1.OperatorCondition{}, "LastTransitionTime", "Reason", "Message"),
 			cmpopts.EquateEmpty(),
