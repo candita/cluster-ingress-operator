@@ -93,6 +93,7 @@ func New(config operatorconfig.Config, kubeConfig *rest.Config) (*Operator, erro
 	if _, err := statuscontroller.New(mgr, statuscontroller.Config{
 		Namespace:              config.Namespace,
 		IngressControllerImage: config.IngressControllerImage,
+		CanaryImage:            config.CanaryImage,
 		OperatorReleaseVersion: config.OperatorReleaseVersion,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to create status controller: %v", err)
@@ -116,15 +117,13 @@ func New(config operatorconfig.Config, kubeConfig *rest.Config) (*Operator, erro
 		return nil, fmt.Errorf("failed to create dns controller: %v", err)
 	}
 
-	// Set up the canary controller when the config.CanaryImage is not empty
-	if len(config.CanaryImage) != 0 {
-		if _, err := canarycontroller.New(mgr, canarycontroller.Config{
-			Namespace:   config.Namespace,
-			CanaryImage: config.CanaryImage,
-			Stop:        config.Stop,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to create canary controller: %v", err)
-		}
+	// Set up the canary controller
+	if _, err := canarycontroller.New(mgr, canarycontroller.Config{
+		Namespace:   config.Namespace,
+		CanaryImage: config.CanaryImage,
+		Stop:        config.Stop,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to create canary controller: %v", err)
 	}
 
 	return &Operator{
