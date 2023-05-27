@@ -11,7 +11,6 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	operatorclient "github.com/openshift/cluster-ingress-operator/pkg/operator/client"
-	gwapi "github.com/openshift/cluster-ingress-operator/pkg/operator/controller/gatewayapi"
 
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -36,29 +35,61 @@ var crdNames = []string{
 	"referencegrants.gateway.networking.k8s.io",
 }
 
-// FeatureGateName is the name of the feature gate that enables Gateway
-// API support in cluster-ingress-operator.
-FeatureGateName = "GatewayAPI"
+// getEnabledFeatures returns the list of enabled features for the current
+// cluster version (as reported in the clusterversions/version object) from the
+// cluster featuresgates.
+func getEnabledFeatures(t *testing.T) []configv1.FeatureGateName {
+	var version configv1.ClusterVersion
+	if err := wait.PollImmediate(1*time.Second, 1*time.Minute, func() (bool, error) {
+		name := types.NamespacedName{Name: "version"}
+		if err := kclient.Get(context.TODO(), name, &version); err != nil {
+			t.Log(err)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	desiredVersion := version.Status.Desired.Version
+	if len(desiredVersion) == 0 && len(version.Status.History) > 0 {
+		desiredVersion = version.Status.History[0].Version
+	}
+
+	var featureGate configv1.FeatureGate
+	if err := wait.PollImmediate(1*time.Second, 1*time.Minute, func() (bool, error) {
+		name := types.NamespacedName{Name: "cluster"}
+		if err := kclient.Get(context.TODO(), name, &featureGate); err != nil {
+			t.Log(err)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	foundVersion := false
+	var enabledFeatures []configv1.FeatureGateName
+	for _, featureGateValues := range featureGate.Status.FeatureGates {
+		if featureGateValues.Version != desiredVersion {
+			continue
+		}
+		foundVersion = true
+		for _, enabled := range featureGateValues.Enabled {
+			enabledFeatures = append(enabledFeatures, enabled.Name)
+		}
+	}
+	if !foundVersion {
+		t.Fatalf("missing desired version %q in featuregates.config.openshift.io/cluster", desiredVersion)
+	}
+	return enabledFeatures
+}
 
 // TestGatewayAPIResources tests that basic functions for Gateway API Custom Resources are functional.
 // It specifically verifies that when the GatewayAPI feature gate is enabled, then a user can
 // create a GatewayClass, Gateway, and HTTPRoute.
 func TestGatewayAPIResources(t *testing.T) {
 	t.Parallel()
-
-	// Get the cluster feature gate
-	featureGate := &configv1.FeatureGate{}
-	err := wait.PollImmediate(1*time.Second, 1*time.Minute, func() (bool, error) {
-		name := types.NamespacedName{"", "cluster"}
-		if err := kclient.Get(context.TODO(), name, featureGate); err != nil {
-			t.Logf("failed to get feature gate %s: %v", gwapi.FeatureGateName, err)
-			return false, nil
-		}
-		return true, nil
-	})
-	if err != nil {
-		t.Fatalf("failed to find feature gate: %v", err)
-	}
 
 	// Create a test namespace
 	ns := &corev1.Namespace{
@@ -79,7 +110,15 @@ func TestGatewayAPIResources(t *testing.T) {
 	}()
 
 	// Check if the feature gate is disabled, and if it is, make sure no GWAPI CRDs can be created
-	if !gwapi.FeatureIsEnabled(gwapi.FeatureGateName, featureGate) {
+	// Get the cluster feature gate
+	enabledFeatures := getEnabledFeatures(t)
+	gatewayAPIEnabled := false
+	for _, feature := range enabledFeatures {
+		if feature == configv1.FeatureGateGatewayAPI {
+			gatewayAPIEnabled = true
+		}
+	}
+	if !gatewayAPIEnabled {
 		t.Logf("feature gate not enabled")
 
 		// Make sure nothing can happen with the Gateway API CRDs when the feature is disabled
@@ -99,11 +138,28 @@ func TestGatewayAPIResources(t *testing.T) {
 		}
 
 		// Enable the feature gate for the rest of the test
+		var featureGate configv1.FeatureGate
+		if err := wait.PollImmediate(1*time.Second, 1*time.Minute, func() (bool, error) {
+			name := types.NamespacedName{Name: "cluster"}
+			if err := kclient.Get(context.TODO(), name, &featureGate); err != nil {
+				t.Log(err)
+				return false, nil
+			}
+			return true, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
 		featureGate.Spec.FeatureGateSelection.FeatureSet = configv1.CustomNoUpgrade
 		featureGate.Spec.FeatureGateSelection.CustomNoUpgrade = &configv1.CustomFeatureGates{
-			Enabled: []string{gwapi.FeatureGateName},
+			Enabled: append(enabledFeatures, configv1.FeatureGateGatewayAPI),
 		}
-		if err := kclient.Update(context.TODO(), featureGate); err != nil {
+		if err := wait.PollImmediate(1*time.Second, 1*time.Minute, func() (bool, error) {
+			if err := kclient.Update(context.TODO(), &featureGate); err != nil {
+				t.Log(err)
+				return false, nil
+			}
+			return true, nil
+		}); err != nil {
 			t.Fatalf("error enabling feature gate: %v", err)
 		}
 		t.Logf("enabled feature gate")
@@ -293,41 +349,3 @@ func buildHTTPRoute(routename, namespace, parentgateway, parentnamespace, hostna
 		},
 	}
 }
-
-// FeatureIsEnabled takes a feature name and a featuregate config API object and
-// returns a Boolean indicating whether the named feature is enabled.
-//
-// This function determines whether a named feature is enabled as follows:
-//
-//   - First, if the featuregate's spec.featureGateSelection.featureSet field is
-//     set to "CustomNoUpgrade", then the feature is enabled if, and only if, it
-//     is specified in spec.featureGateSelection.customNoUpgrade.enabled.
-//
-//   - Second, if spec.featureGateSelection.featureSet is set to a value that
-//     isn't defined in configv1.FeatureSets, then the feature is *not* enabled.
-//
-//   - Finally, the feature is enabled if, and only if, the feature is specified
-//     in configv1.FeatureSets[spec.featureGateSelection.featureSet].enabled.
-func FeatureIsEnabled(feature string, fg *configv1.FeatureGate) bool {
-	if fg.Spec.FeatureSet == configv1.CustomNoUpgrade {
-		if fg.Spec.FeatureGateSelection.CustomNoUpgrade == nil {
-			return false
-		}
-		for _, f := range fg.Spec.FeatureGateSelection.CustomNoUpgrade.Enabled {
-			if f == feature {
-				return true
-			}
-		}
-		return false
-	}
-
-	if fs, ok := configv1.FeatureSets[fg.Spec.FeatureSet]; ok {
-		for _, f := range fs.Enabled {
-			if f == feature {
-				return true
-			}
-		}
-	}
-	return false
-}
-
