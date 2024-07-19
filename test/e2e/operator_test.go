@@ -40,6 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/endpoints"
 
 	"github.com/go-logr/logr"
+	"github.com/stretchr/testify/assert"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -55,6 +56,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/pointer"
@@ -970,23 +972,23 @@ func TestHostNetworkEndpointPublishingStrategy(t *testing.T) {
 // TestHostNetworkPortBinding creates two ingresscontrollers on the same node
 // with different port bindings and verifies that both routers are available.
 func TestHostNetworkPortBinding(t *testing.T) {
-	// deploy first ingresscontroller with the default port bindings
+	t.Log("creating an ingresscontroller with the default port bindings")
 	name1 := types.NamespacedName{Namespace: operatorNamespace, Name: "hostnetworkportbinding"}
 	ing1 := newHostNetworkController(name1, name1.Name+"."+dnsConfig.Spec.BaseDomain)
 	if err := kclient.Create(context.TODO(), ing1); err != nil {
 		t.Fatalf("failed to create the first ingresscontroller: %v", err)
 	}
-	defer assertIngressControllerDeleted(t, kclient, ing1)
+	t.Cleanup(func() { assertIngressControllerDeleted(t, kclient, ing1) })
 
 	err := waitForIngressControllerCondition(t, kclient, 5*time.Minute, name1, availableConditionsForIngressControllerWithHostNetwork...)
 	if err != nil {
 		t.Errorf("failed to observe expected conditions for the first ingresscontroller: %v", err)
 	}
 
-	// get first router's single replica
+	t.Log("getting pod list for the first ingresscontroller")
 	pods := &corev1.PodList{}
 	if err := kclient.List(context.TODO(), pods, client.InNamespace(operandNamespace)); err != nil {
-		t.Fatalf("failed to list the first ingresscontroller's PODs: %v", err)
+		t.Fatalf("failed to list the first ingresscontroller's pods: %v", err)
 	}
 	var pod1 *corev1.Pod
 	for _, p := range pods.Items {
@@ -996,7 +998,7 @@ func TestHostNetworkPortBinding(t *testing.T) {
 		}
 	}
 	if pod1 == nil {
-		t.Fatal("failed to find the first ingresscontroller's POD")
+		t.Fatal("failed to find the first ingresscontroller's pod")
 	}
 
 	routerContainer := pod1.Spec.Containers[0]
@@ -1007,14 +1009,40 @@ func TestHostNetworkPortBinding(t *testing.T) {
 		t.Errorf("pod %s is not running on the host's network", pod1.Name)
 	}
 
-	// create second ingresscontroller on the same node but with different port bindings
+	t.Log("verifying that the first ingresscontroller's internal service has the expected ports")
+	ing1ServiceName := controller.InternalIngressControllerServiceName(ing1)
+	ing1Service := &corev1.Service{}
+	if err := kclient.Get(context.TODO(), ing1ServiceName, ing1Service); err != nil {
+		t.Fatal(err)
+	}
+	expectedInternalServicePorts := []corev1.ServicePort{{
+		Name:       "http",
+		Protocol:   "TCP",
+		Port:       int32(80),
+		TargetPort: intstr.FromString("http"),
+	}, {
+		Name:       "https",
+		Protocol:   "TCP",
+		Port:       int32(443),
+		TargetPort: intstr.FromString("https"),
+	}, {
+		Name:       "metrics",
+		Protocol:   "TCP",
+		Port:       int32(1936),
+		TargetPort: intstr.FromString("metrics"),
+	}}
+	assert.Equal(t, expectedInternalServicePorts, ing1Service.Spec.Ports)
+
+	t.Log("creating a second ingresscontroller on the same node but with different port bindings")
 	name2 := types.NamespacedName{Namespace: operatorNamespace, Name: "samehost"}
 	strategy := &operatorv1.HostNetworkStrategy{
 		HTTPPort:  9080,
 		HTTPSPort: 9443,
 		StatsPort: 9936,
 	}
-	// take the node placement of the first router
+	// Take the node name of the first ingresscontroller and configure a
+	// node selector on the second ingresscontroller to force the router
+	// pods all to land on the same node host.
 	placement := &operatorv1.NodePlacement{
 		Tolerations: pod1.Spec.Tolerations,
 		NodeSelector: &metav1.LabelSelector{
@@ -1028,15 +1056,16 @@ func TestHostNetworkPortBinding(t *testing.T) {
 	if err := kclient.Create(context.TODO(), ing2); err != nil {
 		t.Fatalf("failed to create the second ingresscontroller: %v", err)
 	}
-	defer assertIngressControllerDeleted(t, kclient, ing2)
+	t.Cleanup(func() { assertIngressControllerDeleted(t, kclient, ing2) })
 
 	err = waitForIngressControllerCondition(t, kclient, 5*time.Minute, name2, availableConditionsForIngressControllerWithHostNetwork...)
 	if err != nil {
 		t.Errorf("failed to observe expected conditions for the second ingresscontroller: %v", err)
 	}
 
+	t.Log("getting pod list for the second ingresscontroller")
 	if err := kclient.List(context.TODO(), pods, client.InNamespace(operandNamespace)); err != nil {
-		t.Fatalf("failed to list the first ingresscontroller's PODs: %v", err)
+		t.Fatalf("failed to list the first ingresscontroller's pods: %v", err)
 	}
 	var pod2 *corev1.Pod
 	for _, p := range pods.Items {
@@ -1046,7 +1075,7 @@ func TestHostNetworkPortBinding(t *testing.T) {
 		}
 	}
 	if pod2 == nil {
-		t.Fatalf("failed to find the second ingresscontroller's POD")
+		t.Fatalf("failed to find the second ingresscontroller's pod")
 	}
 	routerContainer = pod2.Spec.Containers[0]
 	assertContainerHasPort(t, routerContainer, "http", 9080)
@@ -1055,6 +1084,14 @@ func TestHostNetworkPortBinding(t *testing.T) {
 	if !pod2.Spec.HostNetwork {
 		t.Errorf("pod %s is not running on the host's network", pod2.Name)
 	}
+
+	t.Log("verifying that the second ingresscontroller's internal service has the expected ports")
+	ing2ServiceName := controller.InternalIngressControllerServiceName(ing2)
+	ing2Service := &corev1.Service{}
+	if err := kclient.Get(context.TODO(), ing2ServiceName, ing2Service); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, expectedInternalServicePorts, ing2Service.Spec.Ports)
 }
 
 func assertContainerHasPort(t *testing.T, container corev1.Container, name string, port int32) {
@@ -3089,6 +3126,139 @@ func TestAWSELBConnectionIdleTimeout(t *testing.T) {
 	}
 }
 
+// TestConnectTimeout verifies that the router's connect timeout works as expected.
+func TestConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Create a dedicated ingresscontroller with the connect timeout set to 2s
+	// instead of the default 5s to let the test run a little faster.
+	icName := types.NamespacedName{Namespace: operatorNamespace, Name: "test-connect-timeout"}
+	ic := newLoadBalancerController(icName, icName.Name+"."+dnsConfig.Spec.BaseDomain)
+	ic.Spec.TuningOptions = operatorv1.IngressControllerTuningOptions{
+		ConnectTimeout: &metav1.Duration{Duration: 2 * time.Second},
+	}
+	if err := kclient.Create(context.Background(), ic); err != nil {
+		t.Fatalf("failed to create ingresscontroller: %v", err)
+	}
+	t.Cleanup(func() { assertIngressControllerDeleted(t, kclient, ic) })
+
+	operatorImage, err := getIngressOperatorDeploymentImage(t, kclient, 1*time.Minute)
+	if err != nil {
+		t.Fatal("failed to determine ingress operator deployment's image: ", err)
+	}
+
+	iptablesImage, err := getIptablesImage(t, kclient, 1*time.Minute)
+	if err != nil {
+		t.Fatal("failed to determine image with iptables tool: ", err)
+	}
+
+	// Create a pod with an HTTP application that delays the connection and sends echo responses.
+	httpdPod := buildDelayConnectHTTPPod("connect-timeout-http", operatorcontroller.DefaultOperandNamespace, iptablesImage, operatorImage)
+	if err := kclient.Create(context.Background(), httpdPod); err != nil {
+		t.Fatalf("failed to create pod %s/%s: %v", httpdPod.Namespace, httpdPod.Name, err)
+	}
+	t.Cleanup(func() {
+		if err := kclient.Delete(context.Background(), httpdPod); err != nil {
+			t.Fatalf("failed to delete pod %s/%s: %v", httpdPod.Namespace, httpdPod.Name, err)
+		}
+	})
+
+	if err := waitForPodReady(t, kclient, httpdPod, 2*time.Minute); err != nil {
+		t.Fatalf("failed to observe expected conditions: %v", err)
+	}
+
+	httpdService := buildEchoService(httpdPod.Name, httpdPod.Namespace, httpdPod.ObjectMeta.Labels)
+	if err := kclient.Create(context.Background(), httpdService); err != nil {
+		t.Fatalf("failed to create service %s/%s: %v", httpdService.Namespace, httpdService.Name, err)
+	}
+	t.Cleanup(func() {
+		if err := kclient.Delete(context.Background(), httpdService); err != nil {
+			t.Fatalf("failed to delete service %s/%s: %v", httpdService.Namespace, httpdService.Name, err)
+		}
+	})
+
+	route := buildRoute(httpdPod.Name, httpdPod.Namespace, httpdService.Name)
+	route.Spec.Host = fmt.Sprintf("%s-%s.%s", route.Name, route.Namespace, ic.Spec.Domain)
+	if err := kclient.Create(context.Background(), route); err != nil {
+		t.Fatalf("failed to create route %s/%s: %v", route.Namespace, route.Name, err)
+	}
+	t.Cleanup(func() {
+		if err := kclient.Delete(context.Background(), route); err != nil {
+			t.Fatalf("failed to delete route %s/%s: %v", route.Namespace, route.Name, err)
+		}
+	})
+
+	// Wait for the load balancer and DNS to be ready.
+	if err := waitForIngressControllerCondition(t, kclient, 10*time.Minute, icName, availableConditionsForIngressControllerWithLoadBalancer...); err != nil {
+		t.Fatalf("failed to observe expected conditions: %v", err)
+	}
+
+	// Get the LB's hostname via the wildcard DNS record
+	wildcardRecordName := controller.WildcardDNSRecordName(ic)
+	wildcardRecord := &iov1.DNSRecord{}
+	if err := kclient.Get(context.Background(), wildcardRecordName, wildcardRecord); err != nil {
+		t.Fatalf("failed to get wildcard dnsrecord %s: %v", wildcardRecordName, err)
+	}
+	lbHostname := wildcardRecord.Spec.Targets[0]
+
+	// Wait until we can resolve the LB's hostname
+	if err := wait.PollUntilContextTimeout(context.Background(), 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+		_, err := net.LookupIP(lbHostname)
+		if err != nil {
+			t.Log(err)
+			return false, nil
+		}
+
+		return true, nil
+	}); err != nil {
+		t.Fatalf("failed to observe expected condition: %v", err)
+	}
+
+	// Open a connection to the route, send a request, and verify that the
+	// connection times out.
+	request, err := http.NewRequest("GET", "http://"+lbHostname, nil)
+	if err != nil {
+		t.Fatalf("failed to create HTTP request: %v", err)
+	}
+	request.Host = route.Spec.Host
+
+	if err := wait.PollUntilContextTimeout(context.Background(), 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+		client := &http.Client{}
+		start := time.Now()
+		response, err := client.Do(request)
+		if err != nil {
+			t.Logf("got unexpected error while sending request: %v", err)
+			return false, nil
+		}
+		defer response.Body.Close()
+		// The "timeout connect" strikes before a connection to the server could
+		// complete. When this happens in HTTP mode, the status code is likely a
+		// 503 or 504 here.
+		// Ref: https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/#8.5
+		switch response.StatusCode {
+		case http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		default:
+			t.Logf("got unexpected response code: %v", response.StatusCode)
+			return false, nil
+		}
+		elapsed := time.Now().Sub(start)
+
+		// Connect timeout is 2 seconds + 3 retries == ~8 seconds.
+		// Disallow lesser values to avoid false positives (e.g. problems with http pod).
+		// Allow up to 1 second more to avoid false negatives.
+		// Ref: https://www.haproxy.com/documentation/haproxy-configuration-tutorials/service-reliability/retries/#set-the-number-of-retries
+		if elapsed.Seconds() < float64(8) || elapsed.Seconds() > float64(9) {
+			t.Logf("got expected response code after unexpected elapsed time %v", elapsed)
+			return false, nil
+		}
+
+		t.Logf("got expected response code after elapsed time %v", elapsed)
+		return true, nil
+	}); err != nil {
+		t.Fatalf("failed to observe expected condition: %v", err)
+	}
+}
+
 func TestUniqueIdHeader(t *testing.T) {
 	t.Parallel()
 	icName := types.NamespacedName{Namespace: operatorNamespace, Name: "uniqueid"}
@@ -3942,6 +4112,30 @@ func waitForDeploymentCompleteWithOldPodTermination(t *testing.T, cl client.Clie
 	})
 }
 
+// waitForPodReady waits for a pod to become ready.
+func waitForPodReady(t *testing.T, cl client.Client, pod *corev1.Pod, timeout time.Duration) error {
+	t.Helper()
+	name := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+	p := &corev1.Pod{}
+	err := wait.PollUntilContextTimeout(context.Background(), 2*time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		if err := cl.Get(ctx, name, p); err != nil {
+			t.Logf("error getting pod %s: %v", name, err)
+			return false, nil
+		}
+		for _, cond := range p.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				return true, nil
+			}
+		}
+		t.Logf("pod %s not ready", name)
+		return false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to wait for pod %s to become ready", name)
+	}
+	return nil
+}
+
 func clusterOperatorConditionMap(conditions ...configv1.ClusterOperatorStatusCondition) map[string]string {
 	conds := map[string]string{}
 	for _, cond := range conditions {
@@ -4178,4 +4372,64 @@ u3YLAbyW/lHhOCiZu2iAI8AbmXem9lW6Tr7p/97s0w==
 	}
 
 	return secret, cl.Create(context.TODO(), secret)
+}
+
+// TestReconcileInternalService verifies that the operator reverts changes to
+// the router-internal service.
+func TestReconcileInternalService(t *testing.T) {
+	t.Parallel()
+	icName := types.NamespacedName{
+		Namespace: operatorNamespace,
+		Name:      "reconcile-internal-service",
+	}
+	domain := icName.Name + "." + dnsConfig.Spec.BaseDomain
+	ic := newPrivateController(icName, domain)
+	if err := kclient.Create(context.TODO(), ic); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { assertIngressControllerDeleted(t, kclient, ic) })
+
+	if err := waitForIngressControllerCondition(t, kclient, 5*time.Minute, icName, availableConditionsForPrivateIngressController...); err != nil {
+		t.Fatalf("failed to observe expected conditions: %v", err)
+	}
+
+	serviceName := controller.InternalIngressControllerServiceName(ic)
+	service := &corev1.Service{}
+	if err := kclient.Get(context.TODO(), serviceName, service); err != nil {
+		t.Fatal(err)
+	}
+
+	findPort := func(name string, service *corev1.Service) *corev1.ServicePort {
+		for i := range service.Spec.Ports {
+			if service.Spec.Ports[i].Name == name {
+				return &service.Spec.Ports[i]
+			}
+		}
+		return nil
+	}
+
+	metricsPort := findPort("metrics", service)
+	if metricsPort == nil {
+		t.Fatalf(`"metrics" port was not found among the service's ports: %v`, service.Spec.Ports)
+	}
+	originalMetricsPortTargetPort := metricsPort.TargetPort
+	metricsPort.TargetPort = intstr.FromInt(12345)
+	if err := kclient.Update(context.TODO(), service); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := wait.PollImmediate(1*time.Second, time.Minute, func() (bool, error) {
+		if err := kclient.Get(context.TODO(), serviceName, service); err != nil {
+			t.Log(err)
+			return false, nil
+		}
+		if metricsPort := findPort("metrics", service); metricsPort == nil {
+			t.Fatalf(`"metrics" port was removed from the service's ports: %v`, service.Spec.Ports)
+		} else if metricsPort.TargetPort == originalMetricsPortTargetPort {
+			return true, nil
+		}
+		return false, nil
+	}); err != nil {
+		t.Errorf("failed to observe expected conditions: %v", err)
+	}
 }

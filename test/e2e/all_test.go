@@ -81,6 +81,8 @@ func TestAll(t *testing.T) {
 		t.Run("TestRouteMetricsControllerRouteAndNamespaceSelector", TestRouteMetricsControllerRouteAndNamespaceSelector)
 		t.Run("TestSetIngressControllerResponseHeaders", TestSetIngressControllerResponseHeaders)
 		t.Run("TestSetRouteResponseHeaders", TestSetRouteResponseHeaders)
+		t.Run("TestReconcileInternalService", TestReconcileInternalService)
+		t.Run("TestConnectTimeout", TestConnectTimeout)
 	})
 
 	t.Run("serial", func(t *testing.T) {
@@ -109,6 +111,8 @@ func TestAll(t *testing.T) {
 		t.Run("TestRouterCompressionOperation", TestRouterCompressionOperation)
 		t.Run("TestUpdateDefaultIngressControllerSecret", TestUpdateDefaultIngressControllerSecret)
 		t.Run("TestCanaryRoute", TestCanaryRoute)
+		t.Run("TestCanaryWithMTLS", TestCanaryWithMTLS)
+		t.Run("TestCanaryRouteClearsSpecHost", TestCanaryRouteClearsSpecHost)
 		t.Run("TestRouteHTTP2EnableAndDisableIngressConfig", TestRouteHTTP2EnableAndDisableIngressConfig)
 		t.Run("TestRouteHardStopAfterEnableOnIngressConfig", TestRouteHardStopAfterEnableOnIngressConfig)
 		t.Run("TestRouteHardStopAfterEnableOnIngressControllerHasPriorityOverIngressConfig", TestRouteHardStopAfterEnableOnIngressControllerHasPriorityOverIngressConfig)

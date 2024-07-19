@@ -190,6 +190,41 @@ func Test_canaryDaemonsetChanged(t *testing.T) {
 			},
 			expect: true,
 		},
+		{
+			description: "if canary daemonset environment changed",
+			mutate: func(ds *appsv1.DaemonSet) {
+				ds.Spec.Template.Spec.Containers[0].Env = append(ds.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "foo", Value: "bar"})
+			},
+			expect: true,
+		},
+		{
+			description: "if canary daemonset volume mount changed",
+			mutate: func(ds *appsv1.DaemonSet) {
+				ds.Spec.Template.Spec.Containers[0].VolumeMounts = append(ds.Spec.Template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "foo", MountPath: "/bar"})
+			},
+			expect: true,
+		},
+		{
+			description: "if canary daemonset volume changed",
+			mutate: func(ds *appsv1.DaemonSet) {
+				ds.Spec.Template.Spec.Volumes = append(ds.Spec.Template.Spec.Volumes, corev1.Volume{
+					Name: "foo",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "bar",
+						},
+					},
+				})
+			},
+			expect: true,
+		},
+		{
+			description: "if canary daemonset ports changed",
+			mutate: func(ds *appsv1.DaemonSet) {
+				ds.Spec.Template.Spec.Containers[0].Ports = append(ds.Spec.Template.Spec.Containers[0].Ports, corev1.ContainerPort{Name: "foo", ContainerPort: 1234})
+			},
+			expect: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -200,6 +235,9 @@ func Test_canaryDaemonsetChanged(t *testing.T) {
 			if changed, updated := canaryDaemonSetChanged(original, mutated); changed != tc.expect {
 				t.Errorf("expect canaryDaemonSetChanged to be %t, got %t", tc.expect, changed)
 			} else if changed {
+				if updatedChanged, _ := canaryDaemonSetChanged(original, updated); !updatedChanged {
+					t.Error("canaryDaemonSetChanged reported changes but did not make any update")
+				}
 				if changedAgain, _ := canaryDaemonSetChanged(mutated, updated); changedAgain {
 					t.Error("canaryDaemonSetChanged does not behave as a fixed point function")
 				}
