@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apiserver/pkg/storage/names"
 
-	gwapi "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gwapi "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 const (
